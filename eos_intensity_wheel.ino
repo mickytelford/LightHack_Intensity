@@ -111,9 +111,9 @@ SLIPEncodedSerial SLIPSerial(Serial);
 // This controls the number of wheel "ticks" the device sends to the console
 // for each tick of the encoder. 1 is the default and the most fine setting.
 // Must be an integer.
-#define PAN_SCALE           100
+#define PAN_SCALE           1
 #define TILT_SCALE          1
-
+#define sens                30
 #define SIG_DIGITS          3   // Number of significant digits displayed
 
 #define OSC_BUF_MAX_SIZE    512
@@ -150,6 +150,8 @@ struct Encoder
 };
 struct Encoder panWheel;
 struct Encoder tiltWheel;
+struct Encoder intensityWheel;
+
 
 enum ConsoleType
 {
@@ -408,40 +410,26 @@ void initEncoder(struct Encoder* encoder, uint8_t pinA, uint8_t pinB, uint8_t di
  ******************************************************************************/
 int8_t updateEncoder(struct Encoder* encoder)
 {
-    int8_t encoderMotion = 0;
-    int pinACurrent = digitalRead(encoder->pinA);
-    int pinBCurrent = digitalRead(encoder->pinB);
+  int8_t encoderMotion = 0;
+  int pinACurrent = digitalRead(encoder->pinA);
+  int pinBCurrent = digitalRead(encoder->pinB);
 
-    // Check if the encoder has moved
-    if (encoder->pinAPrevious != pinACurrent || encoder->pinBPrevious != pinBCurrent)
-    {
-        // Determine the direction of movement
-        if ((encoder->pinAPrevious == LOW && encoder->pinBPrevious == LOW && pinACurrent == HIGH && pinBCurrent == LOW) ||
-            (encoder->pinAPrevious == HIGH && encoder->pinBPrevious == LOW && pinACurrent == HIGH && pinBCurrent == HIGH) ||
-            (encoder->pinAPrevious == HIGH && encoder->pinBPrevious == HIGH && pinACurrent == LOW && pinBCurrent == HIGH) ||
-            (encoder->pinAPrevious == LOW && encoder->pinBPrevious == HIGH && pinACurrent == LOW && pinBCurrent == LOW))
-        {
-            encoderMotion = 1;
-        }
-        else if ((encoder->pinAPrevious == LOW && encoder->pinBPrevious == LOW && pinACurrent == LOW && pinBCurrent == HIGH) ||
-                 (encoder->pinAPrevious == LOW && encoder->pinBPrevious == HIGH && pinACurrent == HIGH && pinBCurrent == HIGH) ||
-                 (encoder->pinAPrevious == HIGH && encoder->pinBPrevious == HIGH && pinACurrent == HIGH && pinBCurrent == LOW) ||
-                 (encoder->pinAPrevious == HIGH && encoder->pinBPrevious == LOW && pinACurrent == LOW && pinBCurrent == LOW))
-        {
-            encoderMotion = -1;
-        }
+  // has the encoder moved at all?
+  if (encoder->pinAPrevious != pinACurrent)
+  {
+    // Since it has moved, we must determine if the encoder has moved forwards or backwards
+    encoderMotion = (encoder->pinAPrevious == encoder->pinBPrevious) ? -1 : 1;
 
-        // If we are in reverse mode, flip the direction of the encoder motion
-        if (encoder->direction == REVERSE)
-        {
-            encoderMotion = -encoderMotion;
-        }
+    // If we are in reverse mode, flip the direction of the encoder motion
+    if (encoder->direction == REVERSE)
+      encoderMotion = -encoderMotion;
 
-        encoder->pinAPrevious = pinACurrent;
-        encoder->pinBPrevious = pinBCurrent;
-    }
+    // Update the previous state of the pins
+    encoder->pinAPrevious = pinACurrent;
+    encoder->pinBPrevious = pinBCurrent;
+  }
 
-    return encoderMotion;
+  return encoderMotion;
 }
 
 /*******************************************************************************
@@ -466,39 +454,20 @@ void sendOscMessage(const String &address, float value)
 
 void sendEosWheelMove(WHEEL_TYPE type, float ticks)
 {
-  String wheelMsg("/eos");
+  String wheelMsg("/eos/wheel");
 
-  if (ticks > 0)
-  {
-    if (counter < 50)
-    {
-      counter++;
-      return; // Skip sending the message until the counter is at the threshold
-    }
-    else
-    {
-      wheelMsg.concat("/key/+%");
-      counter = 0; // Reset counter after reaching threshold
-    }
-  }
-  else if (ticks < 0)
-  {
-    if (counter > -50)
-    {
-      counter--;
-      return; // Skip sending the message until the counter is at the threshold
-    }
-    else
-    {
-      wheelMsg.concat("/key/-%");
-      counter = 0; // Reset counter after reaching threshold
-    }
-  }
+  if (digitalRead(SHIFT_BTN) == LOW)
+    wheelMsg.concat("/fine");
   else
-  {
-    // No movement detected
+    wheelMsg.concat("/coarse");
+
+  if (type == PAN)
+    wheelMsg.concat("/pan");
+  else if (type == TILT)
+    wheelMsg.concat("/tilt");
+  else
+    // something has gone very wrong
     return;
-  }
 
   sendOscMessage(wheelMsg, ticks);
 }
@@ -541,6 +510,36 @@ void sendColorSourceWheelMove(WHEEL_TYPE type, float ticks)
 
 /******************************************************************************/
 
+void handleIntensityWheel(float ticks) {
+  String wheelMsg("/eos");
+
+  if (ticks > 0) {
+    if (counter < sens) {
+      counter++;
+      return; // Skip sending the message until the counter is at the threshold
+    } else {
+      wheelMsg.concat("/key/+%");
+      counter = 0; // Reset counter after reaching threshold
+    }
+  } else if (ticks < 0) {
+    if (counter > -sens) {
+      counter--;
+      return; // Skip sending the message until the counter is at the threshold
+    } else {
+      wheelMsg.concat("/key/-%");
+      counter = 0; // Reset counter after reaching threshold
+    }
+  } else {
+    // No movement detected
+    return;
+  }
+
+  // Send the OSC message
+  OSCMessage msg(wheelMsg.c_str());
+  SLIPSerial.beginPacket();
+  msg.send(SLIPSerial);
+  SLIPSerial.endPacket();
+}
 void sendWheelMove(WHEEL_TYPE type, float ticks)
 {
   switch (connectedToConsole)
@@ -680,8 +679,10 @@ void setup()
   // If it's an Eos, request updates on some things
   issueEosSubscribes();
 
-  initEncoder(&panWheel, 8, 9, PAN_DIR);
+  initEncoder(&panWheel, A1, A2, PAN_DIR);
   initEncoder(&tiltWheel, A3, A4, TILT_DIR);
+  initEncoder(&intensityWheel, 8, 9, FORWARD); // Pins 8 and 9, direction FORWARD
+
 
   lcd.begin(LCD_CHARS, LCD_LINES);
   lcd.clear();
@@ -711,26 +712,31 @@ void loop()
 {
   static String curMsg;
   int size;
-  // get the updated state of each encoder
+
+  // Get the updated state of each encoder
   int32_t panMotion = updateEncoder(&panWheel);
   int32_t tiltMotion = updateEncoder(&tiltWheel);
+  int32_t intensityMotion = updateEncoder(&intensityWheel);
 
   // Scale the result by a scaling factor
   panMotion *= PAN_SCALE;
   tiltMotion *= TILT_SCALE;
 
-  // check for next/last updates
+  // Check for next/last updates
   checkButtons();
 
-  // now update our wheels
+  // Update the wheels
   if (tiltMotion != 0)
     sendWheelMove(TILT, tiltMotion);
 
   if (panMotion != 0)
     sendWheelMove(PAN, panMotion);
 
-  // Then we check to see if any OSC commands have come from Eos
-  // and update the display accordingly.
+      if (intensityMotion != 0)
+    handleIntensityWheel(intensityMotion);
+
+
+  // Handle OSC messages from Eos
   size = SLIPSerial.available();
   if (size > 0)
   {
@@ -748,10 +754,11 @@ void loop()
     curMsg = String();
   }
 
+  // Check for timeout and send ping if necessary
   if (lastMessageRxTime > 0)
   {
     unsigned long diff = millis() - lastMessageRxTime;
-    //We first check if it's been too long and we need to time out
+    // Check if it's been too long and we need to timeout
     if (diff > TIMEOUT_AFTER_IDLE_INTERVAL)
     {
       connectedToConsole = ConsoleNone;
@@ -760,8 +767,8 @@ void loop()
       timeoutPingSent = false;
     }
 
-    //It could be the console is sitting idle. Send a ping once to
-    // double check that it's still there, but only once after 2.5s have passed
+    // It could be the console is sitting idle. Send a ping once to
+    // double-check that it's still there, but only once after 2.5s have passed
     if (!timeoutPingSent && diff > PING_AFTER_IDLE_INTERVAL)
     {
       OSCMessage ping("/eos/ping");
@@ -773,6 +780,7 @@ void loop()
     }
   }
 
+  // Update the display if necessary
   if (updateDisplay)
     displayStatus();
 }
