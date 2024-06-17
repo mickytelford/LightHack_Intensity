@@ -1,72 +1,5 @@
-// Copyright (c) 2017 Electronic Theatre Controls, Inc., http://www.etcconnect.com
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
-
-
-/*******************************************************************************
-
-     Electronic Theatre Controls
-
-     lighthack - Box 1
-
-     (C) 2017-2018 by ETC
-
-
-     This code implements a Pan/Tilt module using two encoders and three
-     buttons. The two encoders function as pan and tilt controllers with one
-     button being reserved for controlling fine/coarse mode. The other two
-     buttons are assigned to Next and Last which make it easy to switch between
-     channels.
-
- *******************************************************************************
-
-    NOTE: UPDATE VERSION_STRING IN DEFINITIONS BELOW WHEN VERSION NUMBER CHANGES
-
-    Revision History
-
-    yyyy-mm-dd   Vxx      By_Who                 Comment
-
-    2017-07-21   1.0.0.1  Ethan Oswald Massey    Original creation
-
-    2017-10-19   1.0.0.2  Sam Kearney            Fix build errors on some
-                                                 Arduino platforms. Change
-                                                 OSC subscribe parameters
-
-    2017-10-24   1.0.0.3  Sam Kearney            Add ability to scale encoder
-                                                 output
-
-    2017-11-22   1.0.0.4  Hans Hinrichsen        Add splash msg before Eos
-                                                 connects
-
-    2017-12-07   1.0.0.5  Hans Hinrichsen        Added timeout to disconnect
-                                                 and show splash screen again
-
-    2018-10-25   2.0.0.0  Richard Thompson       Generalised to support other
-                                                 ETC consoles
-
-    2018-10-25   2.0.0.1  Richard Thompson       Add basic support for ColorSource
-
- ******************************************************************************/
-
-/*******************************************************************************
-   Includes
- ******************************************************************************/
+   //Includes
+// ******************************************************************************/
 #include <OSCBoards.h>
 #include <OSCBundle.h>
 #include <OSCData.h>
@@ -89,8 +22,10 @@ SLIPEncodedSerial SLIPSerial(Serial);
 #define LCD_CHARS           16
 #define LCD_LINES           2   // Currently assume at least 2 lines
 
-#define NEXT_BTN            6
-#define LAST_BTN            7
+//#define SHIFT_BTN4             34
+//#define SHIFT_BTN3            35
+//#define SHIFT_BTN2            36
+//#define SHIFT_BTN1            37
 #define SHIFT_BTN           8
 
 #define SUBSCRIBE           ((int32_t)1)
@@ -105,14 +40,20 @@ SLIPEncodedSerial SLIPSerial(Serial);
 // Change these values to switch which direction increase/decrease pan/tilt
 #define PAN_DIR             FORWARD
 #define TILT_DIR            FORWARD
+#define ZOOM_DIR            FORWARD
+#define EDGE_DIR            FORWARD
+#define WHITE_DIR            FORWARD
 
 
 // Use these values to make the encoder more coarse or fine.
 // This controls the number of wheel "ticks" the device sends to the console
 // for each tick of the encoder. 1 is the default and the most fine setting.
 // Must be an integer.
-#define PAN_SCALE           1
-#define TILT_SCALE          1
+#define PAN_TILT_SCALE           1
+#define ZOOM_EDGE_SCALE          1
+#define RED_GREEN_SCALE          1
+#define BLUE_AMBER_SCALE          1
+#define WHITE_WHEEL_SCALE         1
 #define sens                30
 #define SIG_DIGITS          3   // Number of significant digits displayed
 
@@ -136,7 +77,7 @@ const String HANDSHAKE_REPLY = "OK";
 /*******************************************************************************
    Local Types
  ******************************************************************************/
-enum WHEEL_TYPE { TILT, PAN };
+enum WHEEL_TYPE { EDGE_ZOOM, PAN_TILT, RED_GREEN, BLUE_AMBER, WHITE_WHEEL };
 enum WHEEL_MODE { COARSE, FINE };
 
 struct Encoder
@@ -150,6 +91,9 @@ struct Encoder
 };
 struct Encoder panWheel;
 struct Encoder tiltWheel;
+struct Encoder zoomWheel;
+struct Encoder edgeWheel;
+struct Encoder whiteWheel;
 struct Encoder intensityWheel;
 
 
@@ -166,13 +110,14 @@ enum ConsoleType
  ******************************************************************************/
 
 // initialize the library with the numbers of the interface pins
-LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+LiquidCrystal lcd(120, 110, 125, 4, 13, 14);
 
 bool updateDisplay = false;
 ConsoleType connectedToConsole = ConsoleNone;
 unsigned long lastMessageRxTime = 0;
 bool timeoutPingSent = false;
 int counter = 0;
+bool push = false;
 /*******************************************************************************
    Local Functions
  ******************************************************************************/
@@ -186,7 +131,7 @@ int counter = 0;
    Return Value: void
 
  ******************************************************************************/
-void issueEosSubscribes()
+/*void issueEosSubscribes()
 {
   // Add a filter so we don't get spammed with unwanted OSC messages from Eos
   OSCMessage filter("/eos/filter/add");
@@ -208,7 +153,19 @@ void issueEosSubscribes()
   SLIPSerial.beginPacket();
   subTilt.send(SLIPSerial);
   SLIPSerial.endPacket();
-}
+
+    OSCMessage subZoom("/eos/subscribe/param/zoom");
+  subZoom.add(SUBSCRIBE);
+  SLIPSerial.beginPacket();
+  subZoom.send(SLIPSerial);
+  SLIPSerial.endPacket();
+
+      OSCMessage subEdge("/eos/subscribe/param/edge");
+  subEdge.add(SUBSCRIBE);
+  SLIPSerial.beginPacket();
+  subEdge.send(SLIPSerial);
+  SLIPSerial.endPacket();
+}/*/
 
 /*******************************************************************************
    Given a valid OSCMessage (relevant to Pan/Tilt), we update our Encoder struct
@@ -233,18 +190,32 @@ void parseFloatTiltUpdate(OSCMessage& msg, int addressOffset)
   updateDisplay = true;
 }
 
+void parseFloatZoomUpdate(OSCMessage& msg, int addressOffset)
+{
+  zoomWheel.pos = msg.getOSCData(0)->getFloat();
+  updateDisplay = true;
+}
+
+void parseFloatEdgeUpdate(OSCMessage& msg, int addressOffset)
+{
+  edgeWheel.pos = msg.getOSCData(0)->getFloat();
+  updateDisplay = true;
+}
+
 void parseEos(OSCMessage& msg, int addressOffset)
 {
   // If we don't think we're connected, reconnect and subscribe
   if (connectedToConsole != ConsoleEos)
   {
-    issueEosSubscribes();
+    //issueEosSubscribes();
     connectedToConsole = ConsoleEos;
     updateDisplay = true;
   }
 
   if (!msg.route("/out/param/pan", parseFloatPanUpdate, addressOffset))
     msg.route("/out/param/tilt", parseFloatTiltUpdate, addressOffset);
+    msg.route("/out/param/zoom", parseFloatZoomUpdate, addressOffset);
+    msg.route("/out/param/edge", parseFloatEdgeUpdate, addressOffset);
 }
 
 /******************************************************************************/
@@ -286,7 +257,7 @@ void parseOSCMessage(String& msg)
 
     // An Eos would do nothing until subscribed
     // Let Eos know we want updates on some things
-    issueEosSubscribes();
+   // issueEosSubscribes();
 
     updateDisplay = true;
   }
@@ -315,7 +286,7 @@ void parseOSCMessage(String& msg)
    Return Value: void
 
  ******************************************************************************/
-void displayStatus()
+/*void displayStatus()
 {
   lcd.clear();
 
@@ -367,7 +338,7 @@ void displayStatus()
 
   updateDisplay = false;
 }
-
+*/
 /*******************************************************************************
    Initializes a given encoder struct to the requested parameters.
 
@@ -456,19 +427,25 @@ void sendEosWheelMove(WHEEL_TYPE type, float ticks)
 {
   String wheelMsg("/eos/wheel");
 
-  if (digitalRead(SHIFT_BTN) == LOW)
-    wheelMsg.concat("/fine");
-  else
-    wheelMsg.concat("/coarse");
+  // Determine if SHIFT_BTN is pressed
+  bool push = (digitalRead(SHIFT_BTN) == LOW);
 
-  if (type == PAN)
-    wheelMsg.concat("/pan");
-  else if (type == TILT)
-    wheelMsg.concat("/tilt");
-  else
-    // something has gone very wrong
-    return;
 
+  // Determine which OSC message to send based on type and shift button state
+  if (type == PAN_TILT)
+    wheelMsg.concat(push ? "/TILT" : "/PAN");
+  else if (type == EDGE_ZOOM)
+    wheelMsg.concat(push ? "/edge" : "/zoom");
+      else if (type == RED_GREEN)
+    wheelMsg.concat(push ? "/GREEN" : "/RED");
+          else if (type == BLUE_AMBER)
+    wheelMsg.concat(push ? "/AMBER" : "/BLUE");
+              else if (type == WHITE_WHEEL)
+    wheelMsg.concat(push ? "/white" : "/WHITE");
+  else
+    return; // Handle other types of wheels as needed
+
+  // Send the OSC message
   sendOscMessage(wheelMsg, ticks);
 }
 
@@ -476,9 +453,9 @@ void sendCobaltWheelMove(WHEEL_TYPE type, float ticks)
 {
   String wheelMsg("/cobalt/param");
 
-  if (type == PAN)
+  if (type == PAN_TILT)
     wheelMsg.concat("/pan/wheel");
-  else if (type == TILT)
+  else if (type == EDGE_ZOOM)
     wheelMsg.concat("/tilt/wheel");
   else
     // something has gone very wrong
@@ -494,9 +471,9 @@ void sendColorSourceWheelMove(WHEEL_TYPE type, float ticks)
 {
   String wheelMsg("/cs/param");
 
-  if (type == PAN)
+  if (type == PAN_TILT)
     wheelMsg.concat("/pan/wheel");
-  else if (type == TILT)
+  else if (type == EDGE_ZOOM)
     wheelMsg.concat("/tilt/wheel");
   else
     // something has gone very wrong
@@ -567,7 +544,7 @@ void sendWheelMove(WHEEL_TYPE type, float ticks)
    Return Value: void
 
  ******************************************************************************/
-void sendKeyPress(bool down, const String &key)
+/*void sendKeyPress(bool down, const String &key)
 {
   String keyAddress;
   switch (connectedToConsole)
@@ -594,7 +571,7 @@ void sendKeyPress(bool down, const String &key)
   keyMsg.send(SLIPSerial);
   SLIPSerial.endPacket();
 }
-
+*/
 /*******************************************************************************
    Checks the status of all the relevant buttons (i.e. Next & Last)
 
@@ -607,7 +584,7 @@ void sendKeyPress(bool down, const String &key)
 
  ******************************************************************************/
 
-void checkButtons()
+/*void checkButtons()
 {
   // OSC configuration
   const int keyCount = 2;
@@ -643,7 +620,7 @@ void checkButtons()
     }
   }
 }
-
+/*
 /*******************************************************************************
    Here we setup our encoder, lcd, and various input devices. We also prepare
    to communicate OSC with Eos by setting up SLIPSerial. Once we are done with
@@ -677,21 +654,25 @@ void setup()
   SLIPSerial.endPacket();
 
   // If it's an Eos, request updates on some things
-  issueEosSubscribes();
+  //issueEosSubscribes();
 
   initEncoder(&panWheel, A1, A2, PAN_DIR);
   initEncoder(&tiltWheel, A3, A4, TILT_DIR);
-  initEncoder(&intensityWheel, 8, 9, FORWARD); // Pins 8 and 9, direction FORWARD
+  initEncoder(&zoomWheel, 9, 10, ZOOM_DIR);
+  initEncoder(&edgeWheel, 6, 5, EDGE_DIR);
+   initEncoder(&whiteWheel, A5, 7, WHITE_DIR);
+  initEncoder(&intensityWheel, 11, 12, FORWARD); // Pins 8 and 9, direction FORWARD
 
 
   lcd.begin(LCD_CHARS, LCD_LINES);
   lcd.clear();
-
-  pinMode(NEXT_BTN, INPUT_PULLUP);
-  pinMode(LAST_BTN, INPUT_PULLUP);
+  //pinMode(SHIFT_BTN4, INPUT_PULLUP);
+ // pinMode(SHIFT_BTN3, INPUT_PULLUP);
+ // pinMode(SHIFT_BTN2, INPUT_PULLUP);
+ // pinMode(SHIFT_BTN1, INPUT_PULLUP);
   pinMode(SHIFT_BTN, INPUT_PULLUP);
 
-  displayStatus();
+  //displayStatus();
 }
 
 /*******************************************************************************
@@ -716,21 +697,35 @@ void loop()
   // Get the updated state of each encoder
   int32_t panMotion = updateEncoder(&panWheel);
   int32_t tiltMotion = updateEncoder(&tiltWheel);
+  int32_t zoomMotion = updateEncoder(&zoomWheel);
+  int32_t edgeMotion = updateEncoder(&edgeWheel);
+    int32_t whiteMotion = updateEncoder(&whiteWheel);
   int32_t intensityMotion = updateEncoder(&intensityWheel);
 
   // Scale the result by a scaling factor
-  panMotion *= PAN_SCALE;
-  tiltMotion *= TILT_SCALE;
-
+  panMotion *= PAN_TILT_SCALE;
+  tiltMotion *= ZOOM_EDGE_SCALE;
+  zoomMotion *= RED_GREEN_SCALE;
+  edgeMotion *= BLUE_AMBER_SCALE;
+  whiteMotion *= WHITE_WHEEL_SCALE;
   // Check for next/last updates
-  checkButtons();
+  //checkButtons();
 
   // Update the wheels
   if (tiltMotion != 0)
-    sendWheelMove(TILT, tiltMotion);
+    sendWheelMove(EDGE_ZOOM, tiltMotion);
+
+  if (zoomMotion != 0)
+    sendWheelMove(RED_GREEN, zoomMotion);
+
+  if (edgeMotion != 0)
+    sendWheelMove(BLUE_AMBER, edgeMotion);
+
+  if (whiteMotion != 0)
+    sendWheelMove(WHITE_WHEEL, whiteMotion);
 
   if (panMotion != 0)
-    sendWheelMove(PAN, panMotion);
+    sendWheelMove(PAN_TILT, panMotion);
 
       if (intensityMotion != 0)
     handleIntensityWheel(intensityMotion);
@@ -781,6 +776,6 @@ void loop()
   }
 
   // Update the display if necessary
-  if (updateDisplay)
-    displayStatus();
+  //if (updateDisplay)
+   // displayStatus();
 }
